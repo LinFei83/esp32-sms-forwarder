@@ -106,7 +106,7 @@ idf.py -p COM4 flash monitor
 ```bash
 idf.py -DSKIP_NVS_FLASH=ON fullclean
 idf.py -DSKIP_NVS_FLASH=ON build
-idf.py -p /dev/ttyACM0 -DSKIP_NVS_FLASH=ON flash
+idf.py -p COM4 -DSKIP_NVS_FLASH=ON flash
 ```
 
 ### 5. 查看串口日志

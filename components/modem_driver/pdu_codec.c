@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <time.h>
 #include "esp_log.h"
 
 static const char *TAG = "pdu";
@@ -57,19 +58,72 @@ static void decode_address(const char *hex, int num_digits, char *out, size_t ou
     out[pos] = '\0';
 }
 
-// 解码BCD时间戳 -> "YY/MM/DD HH:MM:SS"
+// 解析 SCTS 第 7 字节时区：相对 GMT 的 15 分钟刻度偏移（正=东区）
+static int scts_tz_offset_minutes(uint8_t tz_byte)
+{
+    int negative = (tz_byte & 0x08) != 0;
+    uint8_t b = tz_byte & 0xF7;
+    int quarters = ((b & 0x07) * 10) + ((b >> 4) & 0x0F);
+    int offset = quarters * 15;
+    return negative ? -offset : offset;
+}
+
+// 解码 BCD 时间戳 -> 设备本地时间 "YY/MM/DD HH:MM:SS"
 static void decode_timestamp(const char *hex, char *out, size_t out_size)
 {
-    // SCTS: 7字节 BCD编码 YY MM DD HH MM SS TZ (semi-octet swap)
+    // SCTS: 7 字节 BCD 编码 YY MM DD HH MM SS TZ（semi-octet swap）
     char parts[7][3];
     for (int i = 0; i < 7; i++) {
         parts[i][0] = hex[i * 2 + 1];
         parts[i][1] = hex[i * 2];
         parts[i][2] = '\0';
     }
-    snprintf(out, out_size, "%s/%s/%s %s:%s:%s",
-             parts[0], parts[1], parts[2],
-             parts[3], parts[4], parts[5]);
+
+    int yy = (parts[0][0] - '0') * 10 + (parts[0][1] - '0');
+    int mm = (parts[1][0] - '0') * 10 + (parts[1][1] - '0');
+    int dd = (parts[2][0] - '0') * 10 + (parts[2][1] - '0');
+    int hh = (parts[3][0] - '0') * 10 + (parts[3][1] - '0');
+    int mi = (parts[4][0] - '0') * 10 + (parts[4][1] - '0');
+    int ss = (parts[5][0] - '0') * 10 + (parts[5][1] - '0');
+    int tz_min = scts_tz_offset_minutes(hex_byte(hex + 12));
+
+    struct tm t = {0};
+    t.tm_year = (yy >= 0 && yy <= 99) ? (yy + 100) : yy;
+    t.tm_mon  = (mm >= 1 && mm <= 12) ? (mm - 1) : 0;
+    t.tm_mday = (dd >= 1 && dd <= 31) ? dd : 1;
+    t.tm_hour = (hh >= 0 && hh <= 23) ? hh : 0;
+    t.tm_min  = (mi >= 0 && mi <= 59) ? mi : 0;
+    t.tm_sec  = (ss >= 0 && ss <= 59) ? ss : 0;
+    t.tm_isdst = 0;
+
+    // GMT = SCTS 本地时间 - 时区偏移；再转为设备本地时区（如 CST-8）
+    const char *saved_tz = getenv("TZ");
+    char tz_backup[32];
+    if (saved_tz) {
+        snprintf(tz_backup, sizeof(tz_backup), "%s", saved_tz);
+    }
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    time_t utc = mktime(&t);
+    if (utc != (time_t)-1) {
+        utc -= (time_t)tz_min * 60;
+    }
+    if (saved_tz) {
+        setenv("TZ", tz_backup, 1);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
+
+    struct tm local;
+    if (utc != (time_t)-1 && localtime_r(&utc, &local)) {
+        snprintf(out, out_size, "%02d/%02d/%02d %02d:%02d:%02d",
+                 local.tm_year % 100, local.tm_mon + 1, local.tm_mday,
+                 local.tm_hour, local.tm_min, local.tm_sec);
+    } else {
+        snprintf(out, out_size, "%s/%s/%s %s:%s:%s",
+                 parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
+    }
 }
 
 // UTF-16BE (UCS2) -> UTF-8
