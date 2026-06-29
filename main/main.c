@@ -142,8 +142,13 @@ static void sms_notify_task(void *arg)
             }
         }
 
-        // 推送到所有启用的通道（含 SMTP 邮件通道）
-        push_send_to_all(data->sender, data->text, data->timestamp);
+        // 推送到指定或全部通道（含 SMTP 邮件通道）
+        if (data->channel_index >= 0 && data->channel_index < MAX_PUSH_CHANNELS) {
+            push_send_to_channel(&g_config.push_channels[data->channel_index],
+                                 data->sender, data->text, data->timestamp);
+        } else {
+            push_send_to_all(data->sender, data->text, data->timestamp);
+        }
         free(data);
     }
 }
@@ -268,17 +273,8 @@ static void scheduler_task(void *arg)
             strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%d %H:%M:%S", &tm_now);
             char body[128];
             snprintf(body, sizeof(body), "定时任务#%d %s\n%s\n%s", i + 1, ok ? "成功" : "失败", msg_buf, ts_buf);
-            app_event_sms_received_data_t *evt = malloc(sizeof(app_event_sms_received_data_t));
-            if (evt) {
-                snprintf(evt->sender, sizeof(evt->sender), "%s", "定时任务");
-                snprintf(evt->text, sizeof(evt->text), "%s", body);
-                snprintf(evt->timestamp, sizeof(evt->timestamp), "%s", ts_buf);
-                if (xQueueSend(s_sms_queue, &evt, pdMS_TO_TICKS(1000)) != pdTRUE) {
-                    ESP_LOGW(SCHED_TAG, "通知队列已满，丢弃定时任务推送");
-                    free(evt);
-                }
-            } else {
-                ESP_LOGW(SCHED_TAG, "内存不足，无法提交定时任务推送（仅更新 lastRun/lastMsg）");
+            if (!push_submit_to_all("定时任务", body, ts_buf)) {
+                ESP_LOGW(SCHED_TAG, "无法提交定时任务推送（队列满或内存不足）");
             }
             ESP_LOGI(SCHED_TAG, "定时任务#%d 执行完毕: %s（%s）", i + 1, ok ? "成功" : "失败", msg_buf);
         }
@@ -318,6 +314,7 @@ void app_main(void)
     // 创建短信通知队列（深度4，存指针）
     s_sms_queue = xQueueCreate(4, sizeof(app_event_sms_received_data_t *));
     ESP_ERROR_CHECK(s_sms_queue ? ESP_OK : ESP_ERR_NO_MEM);
+    push_set_notify_queue(s_sms_queue);
 
     // 创建短信通知任务，分配 12KB 栈以容纳 TLS/HTTP/SMTP/PDU 编码调用链
     xTaskCreate(sms_notify_task, "sms_notify", 12288, NULL, 5, NULL);
@@ -376,7 +373,9 @@ void app_main(void)
         wifi_mgr_get_device_url(url, sizeof(url));
         char body[128];
         snprintf(body, sizeof(body), "设备已启动\n设备地址: %s", url);
-        push_send_to_all("系统", body, "");
+        if (!push_submit_to_all("系统", body, "")) {
+            ESP_LOGW(TAG, "无法提交启动通知（队列满或内存不足）");
+        }
     }
 
     ESP_LOGI(TAG, "====== 初始化完成，各任务已就绪 ======");

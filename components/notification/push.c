@@ -1,4 +1,5 @@
 #include "push.h"
+#include "app_events.h"
 #include "smtp_client.h"
 #include "utils.h"
 #include "wifi_mgr.h"
@@ -14,6 +15,7 @@
 #include <cJSON.h>
 
 static const char *TAG = "push";
+static QueueHandle_t s_notify_queue;
 
 // HTTP响应缓冲区大小
 #define HTTP_RESP_BUF_SIZE 512
@@ -103,6 +105,49 @@ static int http_get(const char *url)
     }
     esp_http_client_cleanup(client);
     return status;
+}
+
+void push_set_notify_queue(QueueHandle_t queue)
+{
+    s_notify_queue = queue;
+}
+
+static bool push_submit_internal(int channel_index, const char *sender,
+                                 const char *message, const char *timestamp)
+{
+    if (!s_notify_queue) {
+        ESP_LOGW(TAG, "通知队列未初始化，无法提交推送");
+        return false;
+    }
+    app_event_sms_received_data_t *evt = malloc(sizeof(*evt));
+    if (!evt) {
+        ESP_LOGE(TAG, "内存不足，无法提交推送");
+        return false;
+    }
+    snprintf(evt->sender, sizeof(evt->sender), "%s", sender ? sender : "");
+    snprintf(evt->text, sizeof(evt->text), "%s", message ? message : "");
+    snprintf(evt->timestamp, sizeof(evt->timestamp), "%s", timestamp ? timestamp : "");
+    evt->channel_index = channel_index;
+    if (xQueueSend(s_notify_queue, &evt, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "通知队列已满，丢弃推送");
+        free(evt);
+        return false;
+    }
+    return true;
+}
+
+bool push_submit_to_all(const char *sender, const char *message, const char *timestamp)
+{
+    return push_submit_internal(-1, sender, message, timestamp);
+}
+
+bool push_submit_to_channel(int channel_index, const char *sender, const char *message,
+                            const char *timestamp)
+{
+    if (channel_index < 0 || channel_index >= MAX_PUSH_CHANNELS) {
+        return false;
+    }
+    return push_submit_internal(channel_index, sender, message, timestamp);
 }
 
 void push_send_to_channel(const push_channel_t *ch,

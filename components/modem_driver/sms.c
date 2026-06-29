@@ -265,6 +265,7 @@ void sms_process_content(const char *sender, const char *text, const char *times
     safe_strcpy(event_data->sender, sender, sizeof(event_data->sender));
     safe_strcpy(event_data->text, text, sizeof(event_data->text));
     safe_strcpy(event_data->timestamp, timestamp, sizeof(event_data->timestamp));
+    event_data->channel_index = -1;
 
     esp_event_post(APP_EVENT_BASE, APP_EVENT_SMS_RECEIVED, event_data, sizeof(*event_data), portMAX_DELAY);
     free(event_data);

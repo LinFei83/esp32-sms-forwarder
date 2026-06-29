@@ -19,6 +19,7 @@ typedef struct {
     char sender[32];
     char text[2048];
     char timestamp[32];
+    int channel_index;  // -1 表示全部通道，>=0 表示指定通道索引
 } app_event_sms_received_data_t;
 
 #ifdef __cplusplus
