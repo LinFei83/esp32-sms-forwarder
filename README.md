@@ -64,15 +64,28 @@
 ### 1. 准备 ESP-IDF
 
 ```bash
-# 激活 IDF 环境（路径按本机安装调整）
-source /path/to/esp-idf/export.sh
+# 1. 先退出 conda（如有）
+conda deactivate
+
+# 2. 把 ESP-IDF 自带的 Python 放到 PATH 最前面
+$env:Path = "E:\Espressif\python_env\idf5.5_py3.11_env\Scripts;" + $env:Path
+
+# 3. 激活 ESP-IDF 环境
+. E:\Espressif\frameworks\esp-idf-v5.5.4\export.ps1
+
+# 4. 进入项目并编译
+cd E:\Desktop\esp32-sms-forwarder
+idf.py set-target esp32c3   # 仅首次需要
+idf.py build
 ```
+
 
 ### 2. 编译
 
 在项目根目录执行（会自动先构建 `web/` 前端再编译固件）：
 
 ```bash
+cd web && npm install && npm run build
 idf.py build
 ```
 
@@ -81,7 +94,7 @@ idf.py build
 连接 ESP32-C3 到电脑，确认串口（如 Linux 下 `/dev/ttyACM0` 或 `/dev/ttyUSB0`）：
 
 ```bash
-idf.py -p /dev/ttyACM0 flash
+idf.py -p COM4 flash monitor
 ```
 
 烧录时会将 `nvs_config.csv` 打包为 NVS 分区一并写入，**会覆盖设备内已有 NVS 配置**（如 Wi-Fi、推送、后台密码等）。

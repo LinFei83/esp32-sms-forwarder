@@ -11,7 +11,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "esp_sntp.h"
+#include "esp_netif_sntp.h"
 
 static const char *TAG = "wifi_mgr";
 
@@ -149,6 +149,7 @@ void wifi_mgr_init(void)
         return;
     }
     ESP_LOGI(TAG, "WiFi 已连接");
+    wifi_mgr_apply_timezone();
 }
 
 bool wifi_mgr_is_ap_mode(void)
@@ -178,30 +179,73 @@ char *wifi_mgr_get_ip(char *buf, size_t buf_size)
     return buf;
 }
 
-void wifi_mgr_sync_ntp(void)
+static void wifi_mgr_log_network_diag(void)
 {
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!netif) {
+        ESP_LOGW(TAG, "网络诊断: 未找到 STA 网口");
+        return;
+    }
+
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+        ESP_LOGW(TAG, "网络诊断: IP=" IPSTR " 网关=" IPSTR,
+                 IP2STR(&ip_info.ip), IP2STR(&ip_info.gw));
+    }
+
+    esp_netif_dns_info_t dns_info;
+    if (esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns_info) == ESP_OK) {
+        ESP_LOGW(TAG, "网络诊断: DNS=" IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
+    } else {
+        ESP_LOGW(TAG, "网络诊断: 未获取到 DNS 服务器");
+    }
+}
+
+static void ntp_sync_task(void *arg)
+{
+    (void)arg;
     ESP_LOGI(TAG, "正在同步NTP时间...");
 
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, "ntp.ntsc.ac.cn");
-    esp_sntp_setservername(1, "ntp.aliyun.com");
-    esp_sntp_setservername(2, "pool.ntp.org");
-    esp_sntp_init();
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(3,
+        ESP_SNTP_SERVER_LIST(
+            "ntp.aliyun.com",
+            "cn.ntp.org.cn",
+            "ntp.ntsc.ac.cn"));
+    config.start = true;
+    config.smooth_sync = false;
 
-    int retry = 0;
-    while (time(NULL) < 100000 && retry < 100) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        retry++;
+    esp_err_t err = esp_netif_sntp_init(&config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NTP 初始化失败: %s", esp_err_to_name(err));
+        wifi_mgr_log_network_diag();
+        vTaskDelete(NULL);
+        return;
     }
 
-    if (time(NULL) >= 100000) {
+    err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(15000));
+    if (err == ESP_OK && time(NULL) >= 100000) {
         s_time_synced = true;
-        ESP_LOGI(TAG, "NTP时间同步成功，UTC时间戳: %lld", (long long)time(NULL));
-        wifi_mgr_apply_timezone();
+        time_t now = time(NULL);
+        struct tm t;
+        char buf[32];
+        localtime_r(&now, &t);
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &t);
+        ESP_LOGI(TAG, "NTP时间同步成功，本地时间: %s", buf);
     } else {
-        ESP_LOGW(TAG, "NTP时间同步失败，将使用设备时间");
-        wifi_mgr_apply_timezone();
+        ESP_LOGW(TAG, "NTP时间同步失败（%s），定时任务将等待下次同步", esp_err_to_name(err));
+        wifi_mgr_log_network_diag();
     }
+    vTaskDelete(NULL);
+}
+
+void wifi_mgr_sync_ntp(void)
+{
+    static bool started = false;
+    if (started || s_ap_mode) {
+        return;
+    }
+    started = true;
+    xTaskCreate(ntp_sync_task, "ntp_sync", 3072, NULL, 3, NULL);
 }
 
 bool wifi_mgr_time_synced(void)
